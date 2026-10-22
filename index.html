@@ -129,7 +129,9 @@ body.viewer .adm{display:none}
   </section>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script type="application/json" id="seed">{"names":["Fauzi","Tia","Jusman","Nafrijal"],"tx":[{"id":1792552199972,"type":"in","who":0,"date":"2026-10-21","amt":4000,"note":""},{"id":1792569468737,"type":"in","who":0,"date":"2026-10-21","amt":500000,"note":""},{"id":1792574261346,"type":"in","who":1,"date":"2026-10-21","amt":100000,"note":""}]}</script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script type="application/json" id="seed">{"names":["Fauzi","Tia","Jusman","Nafrijal"],"tx":[]}</script>
 <script id="appjs">
 const CAP={css:document.querySelector("style").textContent,login:document.getElementById("login").outerHTML,main:document.querySelector("main").outerHTML,js:document.getElementById("appjs").textContent};
 const COLORS=["#2b7a58","#e0a526","#4b7fb5","#b85c8a"];
@@ -151,18 +153,9 @@ function buildHtml(){
 async function commit(fn){
   const before=JSON.stringify(S);
   fn();renderSelects();render();
-  if(typeof claude==="undefined"||!claude||!claude.use){localMode();return}
-  try{
-    const art=await claude.use("artifact");
-    if(!art)throw {code:"unavailable"};
-    $("saveNote").textContent="Menyimpan\u2026";
-    await art.publish(buildHtml());
-  }catch(e){
-    if(e&&e.code==="conflict")return;
-    S=JSON.parse(before);renderSelects();render();
-    const ro=e&&(e.code==="not_writer"||e.code==="not_granted"||e.code==="unavailable"||e.code==="capability_disabled");
-    $("saveNote").textContent=ro?"Perubahan tidak tersimpan. Hanya pemilik halaman yang sedang login ke akun Claude yang bisa menyimpan catatan.":"Gagal menyimpan. Coba lagi.";
-  }
+  if(!fsRef){S=JSON.parse(before);renderSelects();render();$("saveNote").textContent="Belum terhubung ke database, perubahan dibatalkan.";return}
+  try{await fsRef.set({json:JSON.stringify(S)})}
+  catch(e){S=JSON.parse(before);renderSelects();render();$("saveNote").textContent="Gagal menyimpan ("+(e&&e.code||"error")+"). Periksa koneksi dan aturan Firestore."}
 }
 function localMode(){
   try{localStorage.setItem("tabunganDraft",JSON.stringify({base:SEEDSTR,state:S}))}catch(e){}
@@ -305,7 +298,7 @@ $("periode").onchange=e=>{periode=e.target.value;render()};
 document.querySelectorAll(".tab[data-t]").forEach(b=>b.onclick=()=>{tab=b.dataset.t;document.querySelectorAll(".tab[data-t]").forEach(x=>x.setAttribute("aria-pressed",x===b));render()});
 $("inDate").value=$("outDate").value=today();
 renderSelects();render();
-$("saveNote").textContent="Menampilkan data terbaru saat halaman dibuka. Hanya pemilik halaman yang bisa mencatat.";
+
 
 const PIN_HASH="8559ae45d2529d8a9c8012902f2a2add9b178cafec87ef9cd8828c61e7b39e00";
 async function sha(s){const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(s));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("")}
@@ -329,6 +322,27 @@ async function tryPin(){
 $("pinOk").onclick=tryPin;
 $("pin").onkeydown=e=>{if(e.key==="Enter")tryPin()};
 $("logout").onclick=()=>setRole(null);
+const FB_CFG={apiKey:"AIzaSyCfSl8_ctsKod_mtFraHZHiGpRiIXBk5hc",authDomain:"tabungan-19234.firebaseapp.com",projectId:"tabungan-19234",storageBucket:"tabungan-19234.firebasestorage.app",messagingSenderId:"965570441320",appId:"1:965570441320:web:da284f793cc496fa22cbdd"};
+let fsRef=null;
+function startFirebase(){
+  try{
+    if(typeof firebase==="undefined")throw new Error("sdk");
+    firebase.initializeApp(FB_CFG);
+    fsRef=firebase.firestore().collection("tabungan").doc("state");
+    $("saveNote").textContent="Menghubungkan ke database\u2026";
+    let first=true;
+    fsRef.onSnapshot(snap=>{
+      if(!snap.exists){if(first){first=false;fsRef.set({json:JSON.stringify(S)}).catch(()=>{})}return}
+      first=false;
+      try{
+        const d=JSON.parse(snap.data().json);
+        if(d&&Array.isArray(d.tx)&&Array.isArray(d.names)&&d.names.length===4){S=d;pendingDel=null;renderSelects();render()}
+      }catch(e){}
+      $("saveNote").textContent="Tersambung. Data diperbarui otomatis di semua perangkat (terakhir "+new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit",second:"2-digit"})+").";
+    },err=>{$("saveNote").textContent="Gagal terhubung ke database ("+(err&&err.code||"error")+"). Periksa aturan Firestore dan koneksi."});
+  }catch(e){$("saveNote").textContent="Tidak bisa memuat Firebase. Periksa koneksi internet lalu muat ulang."}
+}
+startFirebase();
 $("refresh").onclick=()=>location.reload();
 $("dl").onclick=download;
 $("pdf").onclick=savePdf;
