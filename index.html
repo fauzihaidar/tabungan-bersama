@@ -140,7 +140,7 @@ let S={names:["Fauzi","Tia","Jusman","Nafrijal"],tx:[]};
 try{const d=JSON.parse(document.getElementById("seed").textContent);if(d&&Array.isArray(d.tx)&&Array.isArray(d.names)&&d.names.length===4)S=d}catch(e){}
 const SEEDSTR=document.getElementById("seed").textContent;let DRAFT=false;
 try{const dr=JSON.parse(localStorage.getItem("tabunganDraft")||"null");if(dr&&dr.base===SEEDSTR&&dr.state&&Array.isArray(dr.state.tx)&&Array.isArray(dr.state.names)&&dr.state.names.length===4){S=dr.state;DRAFT=true}}catch(e){}
-let periode="all",tab="all",pendingDel=null,role=null;
+let periode="all",tab="all",pendingDel=null,role=null,fsRef=null,ready=false,db=null;
 const $=id=>document.getElementById(id);
 const rp=n=>"Rp "+Math.round(n).toLocaleString("id-ID");
 const today=()=>new Date().toISOString().slice(0,10);
@@ -150,12 +150,24 @@ function buildHtml(){
   const seed=JSON.stringify(S).replace(/</g,"\\u003c");
   return '<!DOCTYPE html>\n<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Tabungan Bersama</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap"><style>'+CAP.css+'</style></head><body>\n'+CAP.login+'\n'+CAP.main+'\n<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"><\/script>\n<script type="application/json" id="seed">'+seed+'<\/script>\n<script id="appjs">'+CAP.js+'<\/script>\n</body></html>';
 }
-async function commit(fn){
-  const before=JSON.stringify(S);
-  fn();renderSelects();render();
-  if(!fsRef){S=JSON.parse(before);renderSelects();render();$("saveNote").textContent="Belum terhubung ke database, perubahan dibatalkan.";return}
-  try{await fsRef.set({json:JSON.stringify(S)})}
-  catch(e){S=JSON.parse(before);renderSelects();render();$("saveNote").textContent="Gagal menyimpan ("+(e&&e.code||"error")+"). Periksa koneksi dan aturan Firestore."}
+async function commit(fn,check,errEl){
+  if(!fsRef||!ready){$("saveNote").textContent="Data belum selesai dimuat dari database. Tunggu sampai muncul tulisan Tersambung, lalu coba lagi.";return false}
+  $("saveNote").textContent="Menyimpan\u2026";
+  try{
+    const msg=await db.runTransaction(async t=>{
+      const snap=await t.get(fsRef);
+      if(!snap.exists)throw {code:"doc-missing"};
+      const cur=JSON.parse(snap.data().json);
+      if(!(cur&&Array.isArray(cur.tx)&&Array.isArray(cur.names)&&cur.names.length===4))throw {code:"data-invalid"};
+      const saved=S;S=cur;let m=null,next=null;
+      try{m=check?check():null;if(!m){fn();next=S}}finally{S=saved}
+      if(m)return m;
+      t.set(fsRef,{json:JSON.stringify(next)});
+      return null;
+    });
+    if(msg){(errEl||$("saveNote")).textContent=msg;return false}
+    return true;
+  }catch(e){$("saveNote").textContent="Gagal menyimpan ("+(e&&e.code||"error")+"). Perubahan tidak disimpan.";return false}
 }
 function localMode(){
   try{localStorage.setItem("tabunganDraft",JSON.stringify({base:SEEDSTR,state:S}))}catch(e){}
@@ -270,7 +282,7 @@ function render(){
   const tout=T.filter(t=>t.type==="out").reduce((a,t)=>a+t.amt,0);
   $("avail").textContent=rp(balance());
   $("pdf").textContent=periode==="all"?"Unduh PDF (semua bulan)":"Unduh PDF "+$("periode").selectedOptions[0].textContent;
-  $("saldo").textContent=rp(tin-tout);$("tin").textContent=rp(tin);$("tout").textContent=rp(tout);
+  $("saldo").textContent=(fsRef&&!ready)?"Memuat\u2026":rp(tin-tout);$("tin").textContent=rp(tin);$("tout").textContent=rp(tout);
   $("lblSaldo").textContent=periode==="all"?"Saldo tabungan (semua bulan)":"Saldo "+$("periode").selectedOptions[0].textContent;
   $("people").innerHTML=S.names.map((n,i)=>{
     const m=T.filter(t=>t.type==="in"&&t.who===i).reduce((a,t)=>a+t.amt,0);
@@ -279,7 +291,7 @@ function render(){
   document.querySelectorAll(".p input").forEach(el=>el.onchange=()=>{const i=+el.dataset.i,v=el.value.trim()||"Orang "+(i+1);commit(()=>{S.names[i]=v})});
   const L=T.filter(t=>tab==="all"||t.type===tab).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
   $("rows").innerHTML=L.length?L.map(t=>`<tr><td>${t.date.split("-").reverse().join("/")}</td><td>${t.type==="in"?esc(S.names[t.who]):"Patungan bersama"}</td><td>${esc(t.note||(t.type==="in"?"Pemasukan":"Pengeluaran"))}</td><td class="n ${t.type}">${t.type==="in"?"+":"−"}${rp(t.amt)}</td><td>${role==="admin"?`<button class="x${pendingDel===t.id?' ask':''}" data-id="${t.id}" aria-label="Hapus catatan">${pendingDel===t.id?'Yakin hapus?':'✕'}</button>`:""}</td></tr>`).join(""):`<tr><td colspan="5" class="empty">Belum ada catatan di periode ini. Isi formulir di atas untuk mulai.</td></tr>`;
-  document.querySelectorAll(".x").forEach(b=>b.onclick=()=>{$("delErr").textContent="";if(role!=="admin")return;if(pendingDel!==+b.dataset.id){pendingDel=+b.dataset.id;render();return}pendingDel=null;{const t0=S.tx.find(t=>t.id===+b.dataset.id);if(t0&&t0.type==="in"&&balance()-t0.amt<0){$("delErr").textContent="Pemasukan ini tidak bisa dihapus karena saldo akan minus. Hapus dulu pengeluaran yang melebihi sisa pemasukan.";render();return}const did=+b.dataset.id;commit(()=>{S.tx=S.tx.filter(t=>t.id!==did)});$("delErr").textContent="Catatan dihapus, saldo sudah disesuaikan."}});
+  document.querySelectorAll(".x").forEach(b=>b.onclick=()=>{$("delErr").textContent="";if(role!=="admin")return;if(pendingDel!==+b.dataset.id){pendingDel=+b.dataset.id;render();return}pendingDel=null;{const t0=S.tx.find(t=>t.id===+b.dataset.id);if(t0&&t0.type==="in"&&balance()-t0.amt<0){$("delErr").textContent="Pemasukan ini tidak bisa dihapus karena saldo akan minus. Hapus dulu pengeluaran yang melebihi sisa pemasukan.";render();return}const did=+b.dataset.id;commit(()=>{S.tx=S.tx.filter(t=>t.id!==did)},()=>{const t1=S.tx.find(t=>t.id===did);return t1&&t1.type==="in"&&balance()-t1.amt<0?"Pemasukan ini tidak bisa dihapus karena saldo akan minus.":null},$("delErr")).then(ok=>{if(ok)$("delErr").textContent="Catatan dihapus, saldo sudah disesuaikan."})}});
 }
 function add(type){
   if(role!=="admin")return;
@@ -290,7 +302,7 @@ function add(type){
   if(type==="out"&&amt>balance()){$("err").textContent="Pengeluaran ditolak: jumlahnya "+rp(amt)+" melebihi saldo tersedia "+rp(balance())+".";$("outAmt").focus();return}
   const rec={id:Date.now(),type,who:type==="in"?+$("inWho").value:null,date:$(p+"Date").value||today(),amt,note:$(p+"Note").value.trim()};
   $(p+"Amt").value="";$(p+"Note").value="";
-  commit(()=>{S.tx.push(rec)});
+  commit(()=>{S.tx.push(rec)},(type==="out"?()=>(balance()<amt?"Pengeluaran ditolak: melebihi saldo tersedia "+rp(balance())+".":null):null),$("err"));
 }
 $("addIn").onclick=()=>add("in");
 $("addOut").onclick=()=>add("out");
@@ -323,22 +335,24 @@ $("pinOk").onclick=tryPin;
 $("pin").onkeydown=e=>{if(e.key==="Enter")tryPin()};
 $("logout").onclick=()=>setRole(null);
 const FB_CFG={apiKey:"AIzaSyCfSl8_ctsKod_mtFraHZHiGpRiIXBk5hc",authDomain:"tabungan-19234.firebaseapp.com",projectId:"tabungan-19234",storageBucket:"tabungan-19234.firebasestorage.app",messagingSenderId:"965570441320",appId:"1:965570441320:web:da284f793cc496fa22cbdd"};
-let fsRef=null;
 function startFirebase(){
   try{
     if(typeof firebase==="undefined")throw new Error("sdk");
     firebase.initializeApp(FB_CFG);
-    fsRef=firebase.firestore().collection("tabungan").doc("state");
+    db=firebase.firestore();
+    fsRef=db.collection("tabungan").doc("state");
     $("saveNote").textContent="Menghubungkan ke database\u2026";
-    let first=true;
-    fsRef.onSnapshot(snap=>{
-      if(!snap.exists){if(first){first=false;fsRef.set({json:JSON.stringify(S)}).catch(()=>{})}return}
-      first=false;
-      try{
-        const d=JSON.parse(snap.data().json);
-        if(d&&Array.isArray(d.tx)&&Array.isArray(d.names)&&d.names.length===4){S=d;pendingDel=null;renderSelects();render()}
-      }catch(e){}
-      $("saveNote").textContent="Tersambung. Data diperbarui otomatis di semua perangkat (terakhir "+new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit",second:"2-digit"})+").";
+    render();
+    let creating=false;
+    fsRef.onSnapshot({includeMetadataChanges:true},snap=>{
+      if(snap.exists){
+        try{const d=JSON.parse(snap.data().json);if(d&&Array.isArray(d.tx)&&Array.isArray(d.names)&&d.names.length===4){S=d;pendingDel=null}}catch(e){}
+        if(!snap.metadata.fromCache){ready=true;$("saveNote").textContent="Tersambung. Data diperbarui otomatis di semua perangkat (terakhir "+new Date().toLocaleTimeString("id-ID",{hour:"2-digit",minute:"2-digit",second:"2-digit"})+")."}
+        renderSelects();render();return;
+      }
+      if(snap.metadata.fromCache||creating)return;
+      creating=true;
+      db.runTransaction(async t=>{const s=await t.get(fsRef);if(!s.exists)t.set(fsRef,{json:JSON.stringify(S)})}).then(()=>{ready=true;render()}).catch(e=>{creating=false;$("saveNote").textContent="Gagal membuat data awal ("+(e&&e.code||"error")+")."});
     },err=>{$("saveNote").textContent="Gagal terhubung ke database ("+(err&&err.code||"error")+"). Periksa aturan Firestore dan koneksi."});
   }catch(e){$("saveNote").textContent="Tidak bisa memuat Firebase. Periksa koneksi internet lalu muat ulang."}
 }
